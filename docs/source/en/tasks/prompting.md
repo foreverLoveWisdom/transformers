@@ -35,7 +35,7 @@ practices that help to achieve optimal results more consistently.
 This guide covers the prompt engineering best practices to help you craft better LLM prompts and solve various NLP tasks. 
 You'll learn:
 
-- [Basics of prompting](#basic-prompts)
+- [Basics of prompting](#basics-of-prompting)
 - [Best practices of LLM prompting](#best-practices-of-llm-prompting)
 - [Advanced prompting techniques: few-shot prompting and chain-of-thought](#advanced-prompting-techniques)
 - [When to fine-tune instead of prompting](#prompting-vs-fine-tuning)
@@ -76,11 +76,11 @@ Run inference with decoder-only models with the `text-generation` pipeline:
 
 >>> torch.manual_seed(0) # doctest: +IGNORE_RESULT
 
->>> generator = pipeline('text-generation', model = 'gpt2')
+>>> generator = pipeline('text-generation', model = 'openai-community/gpt2')
 >>> prompt = "Hello, I'm a language model"
 
 >>> generator(prompt, max_length = 30)
-[{'generated_text': "Hello, I'm a language model expert, so I'm a big believer in the concept that I know very well and then I try to look into"}]
+[{'generated_text': "Hello, I'm a language model. Not a programming language at all: it's pretty simple.\n\nWhen I write a function, I mean"}]
 ```
 
 To run inference with an encoder-decoder, use the `text2text-generation` pipeline:
@@ -258,7 +258,7 @@ also be a suitable location for instructions. Typically, it's better to place th
 
 >>> for seq in sequences:
 ...     print(f"{seq['generated_text']}")
-Permaculture is an ecological design mimicking natural ecosystems to meet basic needs and prepare for climate change. It is based on traditional knowledge and scientific understanding.
+"Permaculture is an ecological design method that mimics natural ecosystems' diversity, functionality, and resilience using modern technology and indigenous knowledge. It aims to help"
 ```
 
 #### Question answering
@@ -284,13 +284,13 @@ the leading word or phrase (`"Answer:"`) to nudge the model to start generating 
 
 >>> for seq in sequences:
 ...     print(f"Result: {seq['generated_text']}")
-Result: Modern tools are used, such as immersion blenders
+"Result: Modern tools are used, such as immersion blenders"
 ```
 
 #### Reasoning
 
 Reasoning is one of the most difficult tasks for LLMs, and achieving good results often requires applying advanced prompting techniques, like 
-[Chain-of-though](#chain-of-thought).
+[Chain-of-thought](#chain-of-thought).
 
 Let's try if we can make a model reason about a simple arithmetics task with a basic prompt: 
 
@@ -309,7 +309,7 @@ Let's try if we can make a model reason about a simple arithmetics task with a b
 >>> for seq in sequences:
 ...     print(f"Result: {seq['generated_text']}")
 Result: 
-There are a total of 5 groups, so there are 5 x 4=20 students in the class.
+There are a total of 50 students in the class (5 groups x 4 students per group = 20 groups, and 
 ```
 
 Correct! Let's increase the complexity a little and see if we can still get away with a basic prompt:

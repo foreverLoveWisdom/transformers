@@ -56,15 +56,15 @@ impact performance. Here's a breakdown of your options:
 If your model can comfortably fit onto a single GPU, you have two primary options:
 
 1. DDP - Distributed DataParallel
-2. ZeRO - depending on the situation and configuration used, this method may or may not be faster, however, it's worth experimenting with it.
+2. [Zero Redundancy Optimizer (ZeRO)](https://arxiv.org/abs/1910.02054) - depending on the situation and configuration used, this method may or may not be faster, however, it's worth experimenting with it.
 
 **Case 2: Your model doesn't fit onto a single GPU:**
 
 If your model is too large for a single GPU, you have several alternatives to consider:
 
 1. PipelineParallel (PP)
-2. ZeRO
-3. TensorParallel (TP)
+2. [ZeRO](https://arxiv.org/abs/1910.02054)
+3. [TensorParallel](#tensor-parallelism) (TP)
 
 With very fast inter-node connectivity (e.g., NVLINK or NVSwitch) all three strategies (PP, ZeRO, TP) should result in 
 similar performance. However, without these, PP will be faster than TP or ZeRO. The degree of TP may also 
@@ -140,10 +140,10 @@ Here is the benchmarking code and outputs:
 
 **DP**
 
-```
+```bash
 rm -r /tmp/test-clm; CUDA_VISIBLE_DEVICES=0,1 \
 python examples/pytorch/language-modeling/run_clm.py \
---model_name_or_path gpt2 --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 \
+--model_name_or_path openai-community/gpt2 --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 \
 --do_train --output_dir /tmp/test-clm --per_device_train_batch_size 4 --max_steps 200
 
 {'train_runtime': 110.5948, 'train_samples_per_second': 1.808, 'epoch': 0.69}
@@ -151,10 +151,10 @@ python examples/pytorch/language-modeling/run_clm.py \
 
 **DDP w/ NVlink**
 
-```
+```bash
 rm -r /tmp/test-clm; CUDA_VISIBLE_DEVICES=0,1 \
 torchrun --nproc_per_node 2 examples/pytorch/language-modeling/run_clm.py \
---model_name_or_path gpt2 --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 \
+--model_name_or_path openai-community/gpt2 --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 \
 --do_train --output_dir /tmp/test-clm --per_device_train_batch_size 4 --max_steps 200
 
 {'train_runtime': 101.9003, 'train_samples_per_second': 1.963, 'epoch': 0.69}
@@ -162,10 +162,10 @@ torchrun --nproc_per_node 2 examples/pytorch/language-modeling/run_clm.py \
 
 **DDP w/o NVlink**
 
-```
+```bash
 rm -r /tmp/test-clm; NCCL_P2P_DISABLE=1 CUDA_VISIBLE_DEVICES=0,1 \
 torchrun --nproc_per_node 2 examples/pytorch/language-modeling/run_clm.py \
---model_name_or_path gpt2 --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 \
+--model_name_or_path openai-community/gpt2 --dataset_name wikitext --dataset_config_name wikitext-2-raw-v1 \
 --do_train --output_dir /tmp/test-clm --per_device_train_batch_size 4 --max_steps 200
 
 {'train_runtime': 131.4367, 'train_samples_per_second': 1.522, 'epoch': 0.69}
@@ -285,10 +285,19 @@ following diagram shows an 8-layer model split vertically into two slices, placi
 GPU0 and 4-7 to GPU1:
 
 ```
-===================  ===================
-|  0 | 1 | 2 | 3  |  |  4 | 5 | 6 | 7  |
-===================  ===================
-        GPU0                 GPU1
+================
+| Layer |      |
+|   0   |      |
+|   1   | GPU0 |
+|   2   |      |
+|   3   |      |
+================
+| Layer |      |
+|   4   |      |
+|   5   | GPU1 |
+|   6   |      |
+|   7   |      |
+================
 ```
 
 In this example, when data moves from layer 0 to 3, it's no different from regular forward pass. However, passing data 
@@ -441,12 +450,13 @@ Implementations:
 - [parallelformers](https://github.com/tunib-ai/parallelformers) (only inference at the moment)
 - [SageMaker](https://arxiv.org/abs/2111.05972) - this is a proprietary solution that can only be used on AWS.
 - [OSLO](https://github.com/tunib-ai/oslo) has the tensor parallelism implementation based on the Transformers.
+- [`transformers` integration](main_classes/trainer) tensor parallelism is available through tp_size attribute for models having `base_tp_plan`. Further you can look at [example usage](perf_infer_gpu_multi)
 
 SageMaker combines TP with DP for a more efficient processing.
 
 🤗 Transformers status:
-- core: not yet implemented in the core
-- but if you want inference [parallelformers](https://github.com/tunib-ai/parallelformers) provides this support for most of our models. So until this is implemented in the core you can use theirs. And hopefully training mode will be supported too.
+- core: uses PyTorch 2 APIs to support tensor parallelism to models having base_tp_plan in their respective config classes.
+- Alternatively, you can as well try [parallelformers](https://github.com/tunib-ai/parallelformers) that provides this support for most of our models. Training mode with TP is as well supported natively in transformers.
 - Deepspeed-Inference also supports our BERT, GPT-2, and GPT-Neo models in their super-fast CUDA-kernel-based inference mode, see more [here](https://www.deepspeed.ai/tutorials/inference-tutorial/)
 
 🤗 Accelerate integrates with [TP from Megatron-LM](https://huggingface.co/docs/accelerate/v0.23.0/en/usage_guides/megatron_lm).
@@ -467,7 +477,7 @@ And GPU1 does the same by enlisting GPU3 to its aid.
 Since each dimension requires at least 2 GPUs, here you'd need at least 4 GPUs.
 
 Implementations:
-- [DeepSpeed](https://github.com/microsoft/DeepSpeed)
+- [DeepSpeed](https://github.com/deepspeedai/DeepSpeed)
 - [Megatron-LM](https://github.com/NVIDIA/Megatron-LM)
 - [Varuna](https://github.com/microsoft/varuna)
 - [SageMaker](https://arxiv.org/abs/2111.05972)
@@ -488,7 +498,7 @@ This diagram is from a blog post [3D parallelism: Scaling to trillion-parameter 
 Since each dimension requires at least 2 GPUs, here you'd need at least 8 GPUs.
 
 Implementations:
-- [DeepSpeed](https://github.com/microsoft/DeepSpeed) - DeepSpeed also includes an even more efficient DP, which they call ZeRO-DP.
+- [DeepSpeed](https://github.com/deepspeedai/DeepSpeed) - DeepSpeed also includes an even more efficient DP, which they call ZeRO-DP.
 - [Megatron-LM](https://github.com/NVIDIA/Megatron-LM)
 - [Varuna](https://github.com/microsoft/varuna)
 - [SageMaker](https://arxiv.org/abs/2111.05972)
@@ -526,7 +536,7 @@ Important papers:
 - [Using DeepSpeed and Megatron to Train Megatron-Turing NLG 530B, A Large-Scale Generative Language Model](
 https://arxiv.org/abs/2201.11990)
 
-🤗 Transformers status: not yet implemented, since we have no PP and TP.
+🤗 Transformers status: not yet implemented, since we have no PP.
 
 ## FlexFlow
 
@@ -544,7 +554,7 @@ It performs a sort of 4D Parallelism over Sample-Operator-Attribute-Parameter.
 Examples:
 * Sample
 
-Let's take 10 batches of sequence length 512. If we parallelize them by sample dimension into 2 devices, we get 10 x 512 which becomes be 5 x 2 x 512.
+Let's take 10 batches of sequence length 512. If we parallelize them by sample dimension into 2 devices, we get 10 x 512 which becomes 5 x 2 x 512.
 
 * Operator
 

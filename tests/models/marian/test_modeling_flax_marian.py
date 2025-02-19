@@ -21,7 +21,6 @@ from transformers import MarianConfig, is_flax_available
 from transformers.testing_utils import require_flax, require_sentencepiece, require_tokenizers, slow
 from transformers.utils import cached_property
 
-from ...generation.test_flax_utils import FlaxGenerationTesterMixin
 from ...test_modeling_flax_common import FlaxModelTesterMixin, ids_tensor
 
 
@@ -228,10 +227,9 @@ class FlaxMarianModelTester:
 
 
 @require_flax
-class FlaxMarianModelTest(FlaxModelTesterMixin, unittest.TestCase, FlaxGenerationTesterMixin):
+class FlaxMarianModelTest(FlaxModelTesterMixin, unittest.TestCase):
     is_encoder_decoder = True
     all_model_classes = (FlaxMarianModel, FlaxMarianMTModel) if is_flax_available() else ()
-    all_generative_model_classes = (FlaxMarianMTModel,) if is_flax_available() else ()
 
     def setUp(self):
         self.model_tester = FlaxMarianModelTester(self)
@@ -310,10 +308,6 @@ class FlaxMarianModelTest(FlaxModelTesterMixin, unittest.TestCase, FlaxGeneratio
             input_ids = np.ones((1, 1)) * model.config.eos_token_id
             outputs = model(input_ids)
             self.assertIsNotNone(outputs)
-
-    @unittest.skip("Skipping for now, to fix @ArthurZ or @ydshieh")
-    def test_pipeline_conversational(self):
-        pass
 
 
 @require_flax
