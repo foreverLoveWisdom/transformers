@@ -18,11 +18,11 @@ rendered properly in your Markdown viewer.
 
 [[open-in-colab]]
 
-Before you can train a model on a dataset, it needs to be preprocessed into the expected model input format. Whether your data is text, images, or audio, they need to be converted and assembled into batches of tensors. 🤗 Transformers provides a set of preprocessing classes to help prepare your data for the model. In this tutorial, you'll learn that for:
+Before you can train a model on a dataset, it needs to be preprocessed into the expected model input format. Whether your data is text, images, or audio, it needs to be converted and assembled into batches of tensors. 🤗 Transformers provides a set of preprocessing classes to help prepare your data for the model. In this tutorial, you'll learn that for:
 
 * Text, use a [Tokenizer](./main_classes/tokenizer) to convert text into a sequence of tokens, create a numerical representation of the tokens, and assemble them into tensors.
 * Speech and audio, use a [Feature extractor](./main_classes/feature_extractor) to extract sequential features from audio waveforms and convert them into tensors.
-* Image inputs use a [ImageProcessor](./main_classes/image) to convert images into tensors.
+* Image inputs use a [ImageProcessor](./main_classes/image_processor) to convert images into tensors.
 * Multimodal inputs, use a [Processor](./main_classes/processors) to combine a tokenizer and a feature extractor or image processor.
 
 <Tip>
@@ -54,7 +54,7 @@ Get started by loading a pretrained tokenizer with the [`AutoTokenizer.from_pret
 ```py
 >>> from transformers import AutoTokenizer
 
->>> tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+>>> tokenizer = AutoTokenizer.from_pretrained("google-bert/bert-base-cased")
 ```
 
 Then pass your text to the tokenizer:
@@ -397,7 +397,7 @@ width are expected, for others only the `shortest_edge` is defined.
 >>> _transforms = Compose([RandomResizedCrop(size), ColorJitter(brightness=0.5, hue=0.5)])
 ```
 
-2. The model accepts [`pixel_values`](model_doc/visionencoderdecoder#transformers.VisionEncoderDecoderModel.forward.pixel_values)
+2. The model accepts [`pixel_values`](model_doc/vision-encoder-decoder#transformers.VisionEncoderDecoderModel.forward.pixel_values)
 as its input. `ImageProcessor` can take care of normalizing the images, and generating appropriate tensors.
 Create a function that combines image augmentation and image preprocessing for a batch of images and generates `pixel_values`:
 
@@ -471,7 +471,7 @@ from [`DetrImageProcessor`] and define a custom `collate_fn` to batch images tog
 
 ## Multimodal
 
-For tasks involving multimodal inputs, you'll need a [processor](main_classes/processors) to prepare your dataset for the model. A processor couples together two processing objects such as as tokenizer and feature extractor.
+For tasks involving multimodal inputs, you'll need a [processor](main_classes/processors) to prepare your dataset for the model. A processor couples together two processing objects such as tokenizer and feature extractor.
 
 Load the [LJ Speech](https://huggingface.co/datasets/lj_speech) dataset (see the 🤗 [Datasets tutorial](https://huggingface.co/docs/datasets/load_hub) for more details on how to load a dataset) to see how you can use a processor for automatic speech recognition (ASR):
 

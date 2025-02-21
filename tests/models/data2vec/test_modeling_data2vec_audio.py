@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Testing suite for the PyTorch Data2VecAudio model. """
+"""Testing suite for the PyTorch Data2VecAudio model."""
 
 import math
 import unittest
@@ -22,7 +22,7 @@ from datasets import load_dataset
 
 from tests.test_modeling_common import floats_tensor, ids_tensor, random_attention_mask
 from transformers import Data2VecAudioConfig, is_torch_available
-from transformers.testing_utils import is_pt_flax_cross_test, require_soundfile, require_torch, slow, torch_device
+from transformers.testing_utils import require_soundfile, require_torch, slow, torch_device
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, _config_zero_init
@@ -426,33 +426,20 @@ class Data2VecAudioModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.Tes
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.check_labels_out_of_vocab(*config_and_inputs)
 
-    # Data2VecAudio has no inputs_embeds
+    @unittest.skip(reason="Data2VecAudio has no inputs_embeds")
     def test_inputs_embeds(self):
         pass
 
-    # `input_ids` is renamed to `input_values`
+    @unittest.skip(reason="`input_ids` is renamed to `input_values`")
     def test_forward_signature(self):
         pass
 
-    # Data2VecAudio cannot resize token embeddings
-    # since it has no tokens embeddings
+    @unittest.skip(reason="Data2VecAudio has no tokens embeddings")
     def test_resize_tokens_embeddings(self):
         pass
 
-    # Data2VecAudio has no inputs_embeds
-    # and thus the `get_input_embeddings` fn
-    # is not implemented
-    def test_model_common_attributes(self):
-        pass
-
-    @is_pt_flax_cross_test
-    # non-robust architecture does not exist in Flax
-    def test_equivalence_flax_to_pt(self):
-        pass
-
-    @is_pt_flax_cross_test
-    # non-robust architecture does not exist in Flax
-    def test_equivalence_pt_to_flax(self):
+    @unittest.skip(reason="Data2VecAudio has no inputs_embeds")
+    def test_model_get_set_embeddings(self):
         pass
 
     def test_retain_grad_hidden_states_attentions(self):
@@ -706,7 +693,7 @@ class Data2VecAudioModelIntegrationTest(unittest.TestCase):
         return [x["array"] for x in speech_samples]
 
     def _load_superb(self, task, num_samples):
-        ds = load_dataset("anton-l/superb_dummy", task, split="test")
+        ds = load_dataset("anton-l/superb_dummy", task, split="test", trust_remote_code=True)
 
         return ds[:num_samples]
 

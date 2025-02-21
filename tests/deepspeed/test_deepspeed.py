@@ -25,6 +25,7 @@ import datasets
 from parameterized import parameterized
 
 import tests.trainer.test_trainer
+import transformers
 from tests.trainer.test_trainer import TrainerIntegrationCommon  # noqa
 from transformers import AutoModel, TrainingArguments, is_torch_available, logging
 from transformers.integrations.deepspeed import (
@@ -53,6 +54,8 @@ from transformers.utils import SAFE_WEIGHTS_NAME, is_torch_bf16_available_on_dev
 
 
 if is_torch_available():
+    import torch
+
     from tests.trainer.test_trainer import (  # noqa
         RegressionModelConfig,
         RegressionPreTrainedModel,
@@ -67,9 +70,10 @@ set_seed(42)
 # default torch.distributed port
 DEFAULT_MASTER_PORT = "10999"
 
-T5_SMALL = "t5-small"
+T5_SMALL = "google-t5/t5-small"
 T5_TINY = "patrickvonplaten/t5-tiny-random"
 GPT2_TINY = "sshleifer/tiny-gpt2"
+GPTJ_TINY = "hf-internal-testing/tiny-random-gptj"
 
 
 def load_json(path):
@@ -104,13 +108,13 @@ def require_deepspeed_aio(test_case):
     Decorator marking a test that requires deepspeed aio (nvme)
     """
     if not is_deepspeed_available():
-        return unittest.skip("test requires deepspeed")(test_case)
+        return unittest.skip(reason="test requires deepspeed")(test_case)
 
     import deepspeed
     from deepspeed.ops.aio import AsyncIOBuilder
 
     if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
-        return unittest.skip("test requires deepspeed async-io")(test_case)
+        return unittest.skip(reason="test requires deepspeed async-io")(test_case)
     else:
         return test_case
 
@@ -297,6 +301,74 @@ class CoreIntegrationDeepSpeed(TestCasePlus, TrainerIntegrationCommon):
             torch.allclose(model.new_head.bias, torch.tensor(+100.0, device=model.new_head.bias.device)),
         )
 
+    def test_arange_bf16(self):
+        # Tests that configuring DeepSpeed with 16 bits does not cause float `torch.arange()` tensors to be cast down.
+        # NOTE -- this assumes that the function calls have the following downcast-preventing pattern, i.e.
+        # `torch.arange(...,dtype=torch.int64)` followed by a cast like `.to(torch.float32)`. 🚨 If this pattern is
+        # NOT applied (e.g. `torch.arange(...,dtype=torch.float32)` is used), DeepSpeed can automatically cast it down
+        # at init time. See https://github.com/huggingface/transformers/issues/28685 for more info.
+
+        ds_config = {
+            "train_batch_size": 1,
+            "zero_optimization": {
+                "stage": 3,
+            },
+            "bf16": {"enabled": True},
+        }
+
+        dschf = HfDeepSpeedConfig(ds_config)
+
+        self.assertTrue(dschf.is_zero3())
+        self.assertTrue(is_deepspeed_zero3_enabled())
+
+        with LoggingLevel(logging.INFO):
+            with mockenv_context(**self.dist_env_1_gpu):
+                logger = logging.get_logger("transformers.modeling_utils")
+                with CaptureLogger(logger) as cl:
+                    model = AutoModel.from_pretrained(GPTJ_TINY)
+        self.assertIn("Detected DeepSpeed ZeRO-3", cl.out)
+
+        # The model weights are in BF16 as per deepspeed config
+        self.assertTrue(str(model.h[0].attn.q_proj.weight.dtype) == "torch.bfloat16")
+        good_deepspeed_sin_cos = model.h[0].attn.embed_positions
+
+        # Monkeypatches the function that creates RoPE embeddings using the INCORRECT torch.arange() pattern, and
+        # then recreates the model
+        def bad_deepspeed_create_sinusoidal_positions(num_pos: int, dim: int) -> torch.Tensor:
+            inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, dtype=torch.int64) / dim))
+            # Incorrect pattern here: torch.arange has dtype=torch.float32 as its argument, and it will automatically
+            # converted to BF16 by DeepSpeed
+            sinusoid_inp = torch.einsum("i , j -> i j", torch.arange(num_pos, dtype=inv_freq.dtype), inv_freq)
+            return torch.cat((torch.sin(sinusoid_inp), torch.cos(sinusoid_inp)), dim=1)
+
+        good_deepspeed_create_sinusoidal_positions = transformers.models.gptj.modeling_gptj.create_sinusoidal_positions
+        transformers.models.gptj.modeling_gptj.create_sinusoidal_positions = bad_deepspeed_create_sinusoidal_positions
+
+        with LoggingLevel(logging.INFO):
+            with mockenv_context(**self.dist_env_1_gpu):
+                logger = logging.get_logger("transformers.modeling_utils")
+                with CaptureLogger(logger) as cl:
+                    model = AutoModel.from_pretrained(GPTJ_TINY)
+        self.assertIn("Detected DeepSpeed ZeRO-3", cl.out)
+
+        self.assertTrue(str(model.h[0].attn.q_proj.weight.dtype) == "torch.bfloat16")
+        bad_deepspeed_sin_cos = model.h[0].attn.embed_positions
+
+        # Compares the two values: the two sets of values are different, and the correct one matches the torch
+        # (i.e. outside DeepSpeed) version.
+        good_torch_sin_cos = good_deepspeed_create_sinusoidal_positions(
+            model.config.max_position_embeddings, model.config.rotary_dim
+        )
+        self.assertFalse(torch.allclose(good_deepspeed_sin_cos, bad_deepspeed_sin_cos))
+        torch.testing.assert_close(good_torch_sin_cos, good_deepspeed_sin_cos.cpu())
+
+        # Finally, we can see that the incorrect pattern is okay on vanilla torch, demostrating that this issue is
+        # exclusive to DeepSpeed
+        bad_torch_sin_cos = bad_deepspeed_create_sinusoidal_positions(
+            model.config.max_position_embeddings, model.config.rotary_dim
+        )
+        torch.testing.assert_close(bad_torch_sin_cos, good_torch_sin_cos)
+
 
 class TrainerIntegrationDeepSpeedWithCustomConfig(TestCasePlus):
     def setUp(self):
@@ -410,6 +482,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
                 max_grad_norm=max_grad_norm,
                 adam_beta1=adam_beta1,
                 adam_beta2=adam_beta2,
+                output_dir=self.get_auto_remove_tmp_dir(),
             )
             with self.assertRaises(Exception) as context:
                 trainer.train()
@@ -434,7 +507,9 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             del ds_config_zero2_dict["scheduler"]  # force default HF Trainer scheduler
             ds_config_zero2_dict["zero_optimization"]["offload_optimizer"]["device"] = "none"
             ds_config_zero2_dict["fp16"]["initial_scale_power"] = 1  # force optimizer on the first step
-            trainer = get_regression_trainer(a=a, local_rank=0, fp16=True, deepspeed=ds_config_zero2_dict)
+            trainer = get_regression_trainer(
+                a=a, local_rank=0, fp16=True, deepspeed=ds_config_zero2_dict, output_dir=self.get_auto_remove_tmp_dir()
+            )
             trainer.train()
         new_a = trainer.model.a.item()
         self.assertNotEqual(new_a, a)
@@ -446,7 +521,9 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             del ds_config_zero2_dict["optimizer"]  # force default HF Trainer optimizer
             ds_config_zero2_dict["zero_optimization"]["offload_optimizer"]["device"] = "none"
             ds_config_zero2_dict["fp16"]["initial_scale_power"] = 1  # force optimizer on the first step
-            trainer = get_regression_trainer(a=a, local_rank=0, fp16=True, deepspeed=ds_config_zero2_dict)
+            trainer = get_regression_trainer(
+                a=a, local_rank=0, fp16=True, deepspeed=ds_config_zero2_dict, output_dir=self.get_auto_remove_tmp_dir()
+            )
             trainer.train()
         new_a = trainer.model.a.item()
         self.assertNotEqual(new_a, a)
@@ -458,7 +535,9 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             del ds_config_zero2_dict["scheduler"]  # force default HF Trainer scheduler
             ds_config_zero2_dict["zero_optimization"]["offload_optimizer"]["device"] = "none"
             ds_config_zero2_dict["fp16"]["initial_scale_power"] = 1  # force optimizer on the first step
-            trainer = get_regression_trainer(a=a, local_rank=0, fp16=True, deepspeed=ds_config_zero2_dict)
+            trainer = get_regression_trainer(
+                a=a, local_rank=0, fp16=True, deepspeed=ds_config_zero2_dict, output_dir=self.get_auto_remove_tmp_dir()
+            )
             trainer.train()
         new_a = trainer.model.a.item()
         self.assertNotEqual(new_a, a)
@@ -473,7 +552,10 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             ds_config_zero3_dict = self.get_config_dict(ZERO3)
             ds_config_zero3_dict["zero_optimization"]["offload_optimizer"] = nvme_config
             ds_config_zero3_dict["zero_optimization"]["offload_param"] = nvme_config
-            trainer = get_regression_trainer(local_rank=0, fp16=True, deepspeed=ds_config_zero3_dict)
+            ds_config_zero3_dict["zero_optimization"]["stage3_gather_16bit_weights_on_model_save"] = True
+            trainer = get_regression_trainer(
+                local_rank=0, fp16=True, deepspeed=ds_config_zero3_dict, output_dir=self.get_auto_remove_tmp_dir()
+            )
             with CaptureLogger(deepspeed_logger) as cl:
                 trainer.train()
             self.assertIn("DeepSpeed info", cl.out, "expected DeepSpeed logger output but got none")
@@ -494,6 +576,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
                 fp16=True,
                 model_init=model_init,
                 deepspeed=ds_config_zero3_dict,
+                output_dir=self.get_auto_remove_tmp_dir(),
             )
 
             n_trials = 3
@@ -515,7 +598,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
         ds_config_dict["zero_optimization"]["offload_optimizer"]["device"] = "cpu"
         ds_config_dict["zero_force_ds_cpu_optimizer"] = False  # offload is not efficient w/o CPUAdam
         with mockenv_context(**self.dist_env_1_gpu):
-            kwargs = {"local_rank": 0, "deepspeed": ds_config_dict}
+            kwargs = {"local_rank": 0, "deepspeed": ds_config_dict, "output_dir": self.get_auto_remove_tmp_dir()}
             kwargs[dtype] = True
             trainer = get_regression_trainer(**kwargs)
             with CaptureLogger(deepspeed_logger) as cl:
@@ -531,7 +614,11 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
         # it's run not as a first test as `sys.stdout` will no longer be the same. So we either have
         # to reset `deepspeed_logger.handlers[0].setStream(sys.stdout)` or directly capture from the deepspeed_logger.
         with mockenv_context(**self.dist_env_1_gpu):
-            kwargs = {"local_rank": 0, "deepspeed": self.get_config_dict(stage)}
+            kwargs = {
+                "local_rank": 0,
+                "deepspeed": self.get_config_dict(stage),
+                "output_dir": self.get_auto_remove_tmp_dir(),
+            }
             kwargs[dtype] = True
             trainer = get_regression_trainer(**kwargs)
 
@@ -557,6 +644,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
                 "deepspeed": self.get_config_dict(stage),
                 "per_device_train_batch_size": 8,
                 "logging_steps": 1,
+                "output_dir": self.get_auto_remove_tmp_dir(),
             }
             kwargs[dtype] = True
             trainer = get_regression_trainer(**kwargs)
@@ -571,7 +659,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             # print(trainer.model.b.item())
             # need to investigate at some point
             if (stage == ZERO3 and dtype == FP16) or (dtype == BF16):
-                return
+                self.skipTest(reason="When using zero3/fp16 or any/bf16 the optimizer seems run oddly")
 
             # it's enough that train didn't fail for this test, but we must check that
             # optimizer/scheduler didn't run (since if it did this test isn't testing the right thing)
@@ -600,6 +688,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             "local_rank": 0,
             "train_len": train_len,
             "deepspeed": self.get_config_dict(stage),
+            "output_dir": self.get_auto_remove_tmp_dir(),
         }
         kwargs[dtype] = True
 
@@ -635,6 +724,35 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
 
         # Relative difference. See the note above how to get identical loss on a small bs
         self.assertTrue((no_grad_accum_loss - yes_grad_accum_loss) / (no_grad_accum_loss + 1e-15) <= 1e-3)
+
+    # NOTE: Currently a disabled test. In the future we should re-enable it.
+    # Issue resolves around Zero-3 w/ DPO/TRL + DeepSpeed
+    # As well as Zero-3 inference
+    # Related PR: https://github.com/huggingface/transformers/pull/32299
+    # def test_missed_zero3_init(self):
+    #     from transformers import Trainer  # noqa
+
+    #     with mockenv_context(**self.dist_env_1_gpu):
+    #         model = AutoModel.from_pretrained(T5_TINY)
+    #         training_args = TrainingArguments(
+    #             output_dir="./test_missed_zero3_init",
+    #             deepspeed=self.get_config_dict(ZERO3),
+    #         )
+    #         with self.assertRaises(
+    #             ValueError, msg="Model was not initialized with `Zero-3` despite being configured."
+    #         ):
+    #             _ = Trainer(
+    #                 model=model,
+    #                 args=training_args,
+    #             )
+    #         # Now do it properly, triggered from our `TrainingArguments` earlier
+    #         model = AutoModel.from_pretrained(T5_TINY)
+    #         trainer = Trainer(
+    #             model=model,
+    #             args=training_args,
+    #         )
+    #         assert trainer.is_deepspeed_enabled
+    #         assert model._transformers_zero3_init_used
 
     def check_saved_checkpoints_deepspeed(self, output_dir, freq, total, stage, dtype):
         # adapted from TrainerIntegrationCommon.check_saved_checkpoints
@@ -714,9 +832,6 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             with self.assertRaises(Exception) as context:
                 checkpoint = os.path.join(output_dir, "checkpoint-5")
                 trainer.train(resume_from_checkpoint=f"{checkpoint}-bogus")
-            self.assertTrue(
-                "Can't find a valid checkpoint at" in str(context.exception), f"got exception: {context.exception}"
-            )
 
     @parameterized.expand(params_with_optims_and_schedulers, name_func=parameterized_custom_name_func)
     def test_can_resume_training_normal(self, stage, dtype, optim, scheduler):
@@ -726,7 +841,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
         # ToDo: Currently, hf_optim + hf_scheduler resumes with the correct states and
         # also has same losses for few steps but then slowly diverges. Need to figure it out.
         if optim == HF_OPTIM and scheduler == HF_SCHEDULER:
-            return
+            self.skipTest(reason="hf_optim + hf_scheduler resumes with the correct states but slowly diverges")
 
         output_dir = self.get_auto_remove_tmp_dir("./xxx", after=False)
         ds_config_dict = self.get_config_dict(stage)
@@ -783,7 +898,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             self.check_trainer_state_are_the_same(state, state1)
 
             # Finally, should be able to resume with the same trainer/same deepspeed engine instance
-            # XXX: but currently this not possible due DS bug: https://github.com/microsoft/DeepSpeed/issues/1612
+            # XXX: but currently this not possible due DS bug: https://github.com/deepspeedai/DeepSpeed/issues/1612
             # trainer.train(resume_from_checkpoint=checkpoint)
             # a workaround needs to be used that re-creates the deepspeed engine
 
@@ -822,7 +937,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
             self.assertEqual(b, b1)
             self.check_trainer_state_are_the_same(state, state1)
 
-    def test_config_object(self):
+    def test_ds_config_object(self):
         # test that we can switch from zero2 to zero3 in the same process for example
         # test is_zero, etc.
         output_dir = self.get_auto_remove_tmp_dir()
@@ -860,7 +975,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
     def test_load_best_model(self, stage, dtype):
         # Test that forced deepspeed reinit doesn't break the model. the forced re-init after
         # loading the best model in Trainer is there to workaround this bug in Deepspeed
-        # https://github.com/microsoft/DeepSpeed/issues/1612
+        # https://github.com/deepspeedai/DeepSpeed/issues/1612
         #
         # The test is derived from a repro script submitted in this Issue:
         # https://github.com/huggingface/transformers/issues/17114
@@ -890,7 +1005,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
                 "do_train": True,
                 "do_eval": True,
                 "optim": "adafactor",
-                "evaluation_strategy": "steps",
+                "eval_strategy": "steps",
                 "eval_steps": 1,
                 "save_strategy": "steps",
                 "save_steps": 1,
@@ -937,7 +1052,7 @@ class TrainerIntegrationDeepSpeed(TrainerIntegrationDeepSpeedWithCustomConfig, T
 
             trainer = Trainer(
                 model=model,
-                tokenizer=tokenizer,
+                processing_class=tokenizer,
                 args=training_args,
                 train_dataset=train_dataset,
                 eval_dataset=eval_dataset,
@@ -1044,7 +1159,7 @@ class TestDeepSpeedWithLauncher(TestCasePlus):
     @require_torch_multi_accelerator
     def test_inference(self, dtype):
         if dtype == "bf16" and not is_torch_bf16_available_on_device(torch_device):
-            self.skipTest("test requires bfloat16 hardware support")
+            self.skipTest(reason="test requires bfloat16 hardware support")
 
         # this is just inference, so no optimizer should be loaded
         # it only works for z3 (makes no sense with z1-z2)

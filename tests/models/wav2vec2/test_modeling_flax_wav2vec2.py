@@ -24,9 +24,7 @@ from datasets import load_dataset
 from transformers import Wav2Vec2Config, is_flax_available
 from transformers.testing_utils import (
     CaptureLogger,
-    is_flaky,
     is_librosa_available,
-    is_pt_flax_cross_test,
     is_pyctcdecode_available,
     require_flax,
     require_librosa,
@@ -72,7 +70,7 @@ def _test_wav2vec2_with_lm_invalid_pool(in_queue, out_queue, timeout):
     try:
         _ = in_queue.get(timeout=timeout)
 
-        ds = load_dataset("common_voice", "es", split="test", streaming=True)
+        ds = load_dataset("legacy-datasets/common_voice", "es", split="test", streaming=True, trust_remote_code=True)
         sample = next(iter(ds))
 
         resampled_audio = librosa.resample(sample["audio"]["array"], 48_000, 16_000)
@@ -350,11 +348,6 @@ class FlaxWav2Vec2ModelTest(FlaxModelTesterMixin, unittest.TestCase):
             outputs = model(np.ones((1, 1024), dtype="f4"))
             self.assertIsNotNone(outputs)
 
-    @is_pt_flax_cross_test
-    @is_flaky()
-    def test_equivalence_pt_to_flax(self):
-        super().test_equivalence_pt_to_flax()
-
 
 @require_flax
 class FlaxWav2Vec2UtilsTest(unittest.TestCase):
@@ -585,7 +578,7 @@ class FlaxWav2Vec2ModelIntegrationTest(unittest.TestCase):
     @require_pyctcdecode
     @require_librosa
     def test_wav2vec2_with_lm(self):
-        ds = load_dataset("common_voice", "es", split="test", streaming=True)
+        ds = load_dataset("legacy-datasets/common_voice", "es", split="test", streaming=True, trust_remote_code=True)
         sample = next(iter(ds))
 
         resampled_audio = librosa.resample(sample["audio"]["array"], 48_000, 16_000)
@@ -604,7 +597,7 @@ class FlaxWav2Vec2ModelIntegrationTest(unittest.TestCase):
     @require_pyctcdecode
     @require_librosa
     def test_wav2vec2_with_lm_pool(self):
-        ds = load_dataset("common_voice", "es", split="test", streaming=True)
+        ds = load_dataset("legacy-datasets/common_voice", "es", split="test", streaming=True, trust_remote_code=True)
         sample = next(iter(ds))
 
         resampled_audio = librosa.resample(sample["audio"]["array"], 48_000, 16_000)
